@@ -1,95 +1,112 @@
 from flask import Flask, request, jsonify
 from google.generativeai import GenerativeModel
+import requests
 import os
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+from flask_caching import Cache
 
 app = Flask(__name__)
+cache = Cache(config={'CACHE_TYPE': 'SimpleCache'})
+cache.init_app(app)
 
-# Initialize rate limiter
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"]
-)
+# Initialize Gemini
+gemini = GenerativeModel('gemini-pro', api_key=os.getenv('GEMINI_API_KEY'))
 
-# Initialize Google Gemini
-gemini_api_key = os.getenv('GEMINI_API_KEY')
-if not gemini_api_key:
-    raise ValueError("GEMINI_API_KEY environment variable not set.")
+# AniList GraphQL Query Builder
+def build_anilist_query(params: dict) -> str:
+    base_query = """
+    query ($search: String, $genres: [String], $minEpisodes: Int, $sort: MediaSort) {
+      Page(perPage: 10) {
+        media(
+          type: ANIME
+          search: $search
+          genres: $genres
+          episodes_greater: $minEpisodes
+          sort: [$sort]
+        ) {
+          title { english romaji }
+          description
+          episodes
+          genres
+          averageScore
+          popularity
+          siteUrl
+          recommendations(perPage: 5) {
+            nodes {
+              mediaRecommendation {
+                title { english romaji }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    variables = {
+        "search": params.get("similar_to"),
+        "genres": params.get("genres"),
+        "minEpisodes": params.get("min_episodes", 12),
+        "sort": "POPULARITY_DESC" if params.get("binge") else "SCORE_DESC"
+    }
+    return {"query": base_query, "variables": variables}
 
-model = GenerativeModel('gemini-pro')
+# Gemini Query Parser
+def parse_query(user_query: str) -> dict:
+    prompt = f"""
+    Extract these parameters from the anime recommendation query:
+    - genres (e.g., "fantasy", "romance")
+    - similar_to (specific anime titles)
+    - min_episodes (e.g., 50 for long series)
+    - binge (true/false for popularity-focused)
+    Return ONLY a JSON object. Example:
+    {{"genres": ["action"], "similar_to": "Naruto", "min_episodes": 100}}
 
-# Structured prompt template
-PROMPT_TEMPLATE = """
-You are an expert anime recommendation assistant. For the following query, suggest 3-5 relevant anime titles with these details for each:
-- Title (English and Japanese if available)
-- Genre
-- Brief description (without spoilers)
-- Reason for recommendation
-- Appropriate age rating
-
-Format the response in markdown without headers. Use bullet points with this structure:
-- **Title**: [English] / [Japanese] (Age Rating)
-  - Genre: [Genre1], [Genre2]
-  - Description: [Brief description]
-  - Why Watch: [Reason]
-
-Query: {query}
-"""
+    Query: {user_query}
+    """
+    response = gemini.generate_content(prompt)
+    return eval(response.text)  # Convert JSON string to dict
 
 @app.route('/webhook', methods=['POST'])
-@limiter.limit("10 per minute")  # Rate limiting
+@cache.cached(timeout=3600, query_string=True)
 def webhook():
-    try:
-        data = request.get_json()
-        user_query = data.get('queryResult', {}).get('queryText', '').strip()
-        
-        # Validate input
-        if not user_query or len(user_query) > 200:
-            return jsonify({
-                "fulfillmentText": "Please provide a valid anime request (under 200 characters)."
-            })
-
-        # Generate recommendations
-        response = model.generate_content(
-            PROMPT_TEMPLATE.format(query=user_query),
-            safety_settings={
-                'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
-                'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'
-            }
-        )
-
-        # Format response for Dialogflow
-        return jsonify({
-            "fulfillmentText": format_response(response.text),
-            "payload": {
-                "google": {
-                    "richResponse": {
-                        "items": [{
-                            "simpleResponse": {
-                                "textToSpeech": "Here are my recommendations:",
-                                "displayText": format_response(response.text)
-                            }
-                        }]
-                    }
-                }
-            }
-        })
-
-    except Exception as e:
-        app.logger.error(f"Error processing request: {str(e)}")
-        return jsonify({
-            "fulfillmentText": "Sorry, I encountered an error processing your request. Please try again later."
-        })
-
-def format_response(text: str) -> str:
-    """Clean up Gemini's response and format for chat"""
-    # Remove markdown formatting
-    cleaned = text.replace("**", "").replace("- ", "• ")
-    # Truncate to 4096 characters (Dialogflow limit)
-    return cleaned[:4095]
+    data = request.get_json()
+    user_query = data['queryResult']['queryText']
+    
+    # Step 1: Parse query with Gemini
+    params = parse_query(user_query)
+    
+    # Step 2: Fetch from AniList
+    anilist_response = requests.post(
+        "https://graphql.anilist.co",
+        json=build_anilist_query(params)
+    ).json()
+    
+    # Step 3: Format response
+    recommendations = []
+    for media in anilist_response['data']['Page']['media']:
+        title = media['title']['english'] or media['title']['romaji']
+        rec = {
+            "title": title,
+            "genres": ", ".join(media['genres'][:3]),
+            "episodes": media['episodes'],
+            "score": media['averageScore'],
+            "url": media['siteUrl'],
+            "reason": f"Matches {params.get('genres',[])} genres" + 
+                     (" | Binge-worthy" if params.get('binge') else "")
+        }
+        recommendations.append(rec)
+    
+    # Step 4: Generate natural language summary with Gemini
+    summary_prompt = f"""
+    Summarize these anime recommendations in a friendly tone: {recommendations}
+    Highlight genre matches, episode count, and binge-worthiness.
+    """
+    summary = gemini.generate_content(summary_prompt).text
+    
+    return jsonify({
+        "fulfillmentText": summary,
+        "payload": recommendations
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=os.getenv('FLASK_DEBUG', 'false').lower() == 'true')
+    app.run(host='0.0.0.0', port=port)

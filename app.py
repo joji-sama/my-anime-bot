@@ -25,12 +25,12 @@ def build_anilist_query(params: dict) -> dict:
     params['similar_to'] = str(params.get('similar_to', '')).strip() or None
 
     query = """
-    query ($search: String, $genres: [String], $minEpisodes: Int, $sort: MediaSort) {
+    query ($search: String, $genre_in: [String], $minEpisodes: Int, $sort: MediaSort) {
       Page(perPage: 10) {
         media(
           type: ANIME
           search: $search
-          genres: $genres
+          genre_in: $genre_in
           episodes_greater: $minEpisodes
           sort: [$sort]
         ) {
@@ -54,7 +54,7 @@ def build_anilist_query(params: dict) -> dict:
     """
     variables = {
         "search": params.get("similar_to"),
-        "genres": params.get("genres"),
+        "genre_in": params.get("genres"),
         "minEpisodes": params.get("min_episodes", 12),
         "sort": "POPULARITY_DESC" if params.get("binge") else "SCORE_DESC"
     }
@@ -100,13 +100,13 @@ def webhook():
             "https://graphql.anilist.co",
             json=anilist_request,
             headers={"Accept-Encoding": "gzip"},
-            timeout=10  # Prevent hanging requests
+            timeout=10
         )
 
         # Validate AniList response
         if response.status_code != 200:
             app.logger.error(f"AniList API Error: {response.text}")
-            return jsonify({"fulfillmentText": "Error accessing anime database. Status: {response.status_code}"})
+            return jsonify({"fulfillmentText": f"Error accessing anime database. Status: {response.status_code}"})
 
         anilist_response = response.json()
         if 'errors' in anilist_response:

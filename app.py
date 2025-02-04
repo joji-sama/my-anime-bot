@@ -88,7 +88,10 @@ def webhook():
         user_query = data.get('queryResult', {}).get('queryText', '').strip()
         
         if not user_query or len(user_query) > 500:
-            return jsonify({"fulfillmentText": "Please provide a valid anime request (under 500 characters)."})
+            return jsonify({
+                "fulfillmentText": "Please provide a valid anime request (under 500 characters).",
+                "fulfillmentMessages": [{"text": {"text": ["Please provide a valid request!"]}}]
+            })
 
         # Parse query parameters
         params = parse_query(user_query)
@@ -105,20 +108,33 @@ def webhook():
 
         # Validate AniList response
         if response.status_code != 200:
+            error_msg = f"Error accessing anime database. Status: {response.status_code}"
             app.logger.error(f"AniList API Error: {response.text}")
-            return jsonify({"fulfillmentText": f"Error accessing anime database. Status: {response.status_code}"})
+            return jsonify({
+                "fulfillmentText": error_msg,
+                "fulfillmentMessages": [{"text": {"text": [error_msg]}}]
+            })
 
         anilist_response = response.json()
         if 'errors' in anilist_response:
             app.logger.error(f"AniList Error: {anilist_response['errors']}")
-            return jsonify({"fulfillmentText": "AniList API error. Try again later."})
+            return jsonify({
+                "fulfillmentText": "AniList API error. Try again later.",
+                "fulfillmentMessages": [{"text": {"text": ["Temporary service issue"]}}]
+            })
 
         if not anilist_response.get('data') or not anilist_response['data'].get('Page'):
-            return jsonify({"fulfillmentText": "No results found."})
+            return jsonify({
+                "fulfillmentText": "No results found.",
+                "fulfillmentMessages": [{"text": {"text": ["No matches found"]}}]
+            })
 
         media_items = anilist_response['data']['Page'].get('media', [])
         if not media_items:
-            return jsonify({"fulfillmentText": "No anime match your criteria. Try different parameters!"})
+            return jsonify({
+                "fulfillmentText": "No anime match your criteria. Try different parameters!",
+                "fulfillmentMessages": [{"text": {"text": ["No matches found"]}}]
+            })
 
         # Build recommendations
         recommendations = []
@@ -150,12 +166,34 @@ def webhook():
 
         return jsonify({
             "fulfillmentText": summary,
-            "payload": recommendations
+            "fulfillmentMessages": [
+                {
+                    "text": {
+                        "text": [summary]
+                    }
+                },
+                {
+                    "payload": {
+                        "recommendations": recommendations,
+                        "source": "AniList",
+                        "processed_by": "Gemini AI"
+                    }
+                }
+            ]
         })
 
     except Exception as e:
         app.logger.error(f"Server error: {str(e)}")
-        return jsonify({"fulfillmentText": "An error occurred. Please try again later."})
+        return jsonify({
+            "fulfillmentText": "An error occurred. Please try again later.",
+            "fulfillmentMessages": [
+                {
+                    "text": {
+                        "text": ["⚠️ Service temporarily unavailable"]
+                    }
+                }
+            ]
+        })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

@@ -1,5 +1,6 @@
 flask==3.0.0
 google-generativeai>=0.3.0
-flask-limiter==3.3.0
+requests==2.31.0
+flask-caching==2.0.2
 python-dotenv==1.0.0
 gunicorn

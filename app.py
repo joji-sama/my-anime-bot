@@ -1,16 +1,17 @@
 from flask import Flask, request, jsonify
-from google.generativeai import GenerativeModel
+from google.generativeai import GenerativeModel, configure
 import requests
 import os
 from flask_caching import Cache
 
 app = Flask(__name__)
+# Configure Gemini FIRST
+configure(api_key=os.getenv('GEMINI_API_KEY'))
 cache = Cache(config={'CACHE_TYPE': 'SimpleCache'})
 cache.init_app(app)
 
 # Initialize Gemini
-gemini = GenerativeModel('gemini-pro', api_key=os.getenv('GEMINI_API_KEY'))
-
+gemini = GenerativeModel('gemini-pro')
 # AniList GraphQL Query Builder
 def build_anilist_query(params: dict) -> str:
     base_query = """

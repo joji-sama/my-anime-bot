@@ -5,7 +5,6 @@ import os
 import logging
 import json
 import random
-from datetime import datetime
 from json import JSONDecodeError
 from flask_caching import Cache
 
@@ -27,8 +26,7 @@ You're Nikko, the sassiest anime AI. Respond to: "{query}"
 **Rules**:
 1. Acknowledge request count with attitude
 2. Max 2 emojis (🔥🎌💢🤌)
-3. Roast generic requests
-4. Keep under 4 lines
+3. Keep under 4 lines
 
 Current Query: "{query}"
 Requested Count: {request_count}
@@ -36,7 +34,6 @@ Recommendations: {recommendations}
 """
 
 def build_anilist_query(params: dict) -> dict:
-    """Build AniList query with proper parameters"""
     req_count = min(params.get('request_count', 3), 10)
     
     query = f"""
@@ -62,60 +59,41 @@ def build_anilist_query(params: dict) -> dict:
     """
     
     variables = {
-        "search": params.get("similar_to"),
+        "search": params.get("similar_to", ""),
         "genres": params.get("genres", []),
-        "minEpisodes": params.get("min_episodes", 12),
+        "minEpisodes": int(params.get('min_episodes', 12)),
         "sort": "POPULARITY_DESC" if params.get("binge") else "SCORE_DESC"
     }
     
-    app.logger.info(f"AniList Query Variables: {variables}")
+    app.logger.info(f"AniList Variables: {variables}")
     return {"query": query, "variables": variables}
 
 def parse_query(user_query: str) -> dict:
-    """Gemini-powered query parser"""
     try:
         prompt = f"""
         Extract from: "{user_query}"
         - genres (list)
         - similar_to (string)
-        - min_episodes (int)
-        - binge (bool)
-        - request_count (int)
+        - min_episodes (integer)
+        - binge (boolean)
+        - request_count (integer)
         Return JSON. Example:
         {{"genres": ["action"], "request_count": 3}}
         """
         response = gemini.generate_content(prompt)
-        return json.loads(response.text)
+        parsed = json.loads(response.text)
+        
+        # Ensure genres is a list
+        if 'genres' in parsed:
+            if isinstance(parsed['genres'], str):
+                parsed['genres'] = [parsed['genres']]
+            elif not isinstance(parsed['genres'], list):
+                parsed['genres'] = []
+        
+        return parsed
     except Exception as e:
         app.logger.error(f"Parse error: {str(e)}")
         return {"genres": [], "request_count": 3}
-
-def generate_nikko_response(query: str, recommendations: list, req_count: int) -> str:
-    """Personality-driven response generator"""
-    try:
-        if not recommendations:
-            return random.choice([
-                "Dry spell? 💢 Nothing matches your criteria",
-                "Zero results? Must be an anime void 🕳️"
-            ])
-            
-        recs_formatted = "\n".join(
-            f"{i+1}. {r['title']} ({r['score']}/100)" 
-            for i, r in enumerate(recommendations)
-        )
-        
-        prompt = NIKKO_PROMPT.format(
-            query=query,
-            request_count=req_count,
-            recommendations=recs_formatted
-        )
-        
-        response = gemini.generate_content(prompt)
-        return response.text.strip()
-        
-    except Exception as e:
-        app.logger.error(f"Nikko error: {str(e)}")
-        return f"🔥 Top Picks:\n{recs_formatted}"
 
 @app.route('/webhook', methods=['POST'])
 @cache.cached(timeout=3600, query_string=True)
@@ -144,12 +122,12 @@ def webhook():
             timeout=10
         )
 
-        app.logger.info(f"AniList Response Status: {response.status_code}")
-        app.logger.info(f"AniList Response Body: {response.text}")
+        app.logger.info(f"AniList Status: {response.status_code}")
+        app.logger.info(f"AniList Response: {response.text}")
 
         if response.status_code != 200:
             return jsonify({
-                "fulfillmentText": "AniList is being tsundere 🎌 Try again!",
+                "fulfillmentText": "AniList glitched! 🛠️ Try different terms",
                 "fulfillmentMessages": [{"text": {"text": ["API Error"]}}]
             })
 
@@ -157,11 +135,7 @@ def webhook():
         
         recommendations = []
         for media in media_items:
-            title = (
-                media['title']['english'] or 
-                media['title']['romaji'] or 
-                "Untitled Anime"
-            )
+            title = media['title']['english'] or media['title']['romaji'] or "Untitled"
             recommendations.append({
                 "title": title,
                 "score": media.get('averageScore', 'N/A'),
@@ -169,8 +143,6 @@ def webhook():
                 "url": media.get('siteUrl', 'https://anilist.co')
             })
 
-        app.logger.info(f"Processed Recommendations: {recommendations}")
-        
         nikko_summary = generate_nikko_response(user_query, recommendations, req_count)
         
         return jsonify({
@@ -183,8 +155,7 @@ def webhook():
                 {
                     "payload": {
                         "recommendations": recommendations,
-                        "requested_count": req_count,
-                        "actual_count": len(recommendations)
+                        "requested_count": req_count
                     }
                 }
             ]
@@ -193,7 +164,7 @@ def webhook():
     except Exception as e:
         app.logger.error(f"Critical Error: {str(e)}")
         return jsonify({
-            "fulfillmentText": "System meltdown...too much sass ⚡",
+            "fulfillmentText": "System crashed...too much sass overload 💥",
             "fulfillmentMessages": [{"text": {"text": ["Server error"]}}]
         })
 

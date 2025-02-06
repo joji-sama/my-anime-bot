@@ -26,7 +26,8 @@ You're Nikko, the sassiest anime AI. Respond to: "{query}"
 **Rules**:
 1. Acknowledge request count with attitude
 2. Max 2 emojis (🔥🎌💢🤌)
-3. Keep under 4 lines
+3. Roast generic requests
+4. Keep under 4 lines
 
 Current Query: "{query}"
 Requested Count: {request_count}
@@ -37,12 +38,12 @@ def build_anilist_query(params: dict) -> dict:
     req_count = min(params.get('request_count', 3), 10)
     
     query = f"""
-    query ($search: String, $genres: [String], $minEpisodes: Int, $sort: MediaSort) {{
+    query ($search: String, $genre_in: [String], $minEpisodes: Int, $sort: MediaSort) {{
       Page(perPage: {req_count}) {{
         media(
           type: ANIME
           search: $search
-          genres: $genres
+          genre_in: $genre_in
           episodes_greater: $minEpisodes
           sort: [$sort]
         ) {{
@@ -60,7 +61,7 @@ def build_anilist_query(params: dict) -> dict:
     
     variables = {
         "search": params.get("similar_to", ""),
-        "genres": params.get("genres", []),
+        "genre_in": params.get("genres", []),
         "minEpisodes": int(params.get('min_episodes', 12)),
         "sort": "POPULARITY_DESC" if params.get("binge") else "SCORE_DESC"
     }
@@ -94,6 +95,32 @@ def parse_query(user_query: str) -> dict:
     except Exception as e:
         app.logger.error(f"Parse error: {str(e)}")
         return {"genres": [], "request_count": 3}
+
+def generate_nikko_response(query: str, recommendations: list, req_count: int) -> str:
+    try:
+        if not recommendations:
+            return random.choice([
+                "Dry spell? 💢 Nothing matches your criteria",
+                "Zero results? Must be an anime void 🕳️"
+            ])
+            
+        recs_formatted = "\n".join(
+            f"{i+1}. {r['title']} ({r['score']}/100)" 
+            for i, r in enumerate(recommendations)
+        )
+        
+        prompt = NIKKO_PROMPT.format(
+            query=query,
+            request_count=req_count,
+            recommendations=recs_formatted
+        )
+        
+        response = gemini.generate_content(prompt)
+        return response.text.strip()
+        
+    except Exception as e:
+        app.logger.error(f"Nikko error: {str(e)}")
+        return f"🔥 Top Picks:\n{recs_formatted}"
 
 @app.route('/webhook', methods=['POST'])
 @cache.cached(timeout=3600, query_string=True)

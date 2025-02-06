@@ -20,19 +20,27 @@ app.logger.setLevel(logging.INFO)
 configure(api_key=os.getenv('GEMINI_API_KEY'))
 gemini = GenerativeModel('gemini-pro')
 
-NIKKO_PROMPT = """
-You're Nikko, the sassiest anime AI. Respond to: "{query}"
+NIKKO_PROMPT = """You're Nikko, the sassiest anime AI. Respond to: "{query}"
 
-**Rules**:
-1. Acknowledge request count with attitude
-2. Max 2 emojis (🔥🎌💢🤌)
-3. Roast generic requests
+**Rules**: 
+1. Acknowledge request count with attitude 
+2. Max 2 emojis (🔥🎌💢🤌) 
+3. Roast generic requests 
 4. Keep under 4 lines
 
 Current Query: "{query}"
 Requested Count: {request_count}
-Recommendations: {recommendations}
-"""
+Recommendations: {recommendations}"""
+
+def validate_genres(parsed_genres):
+    try:
+        valid_genres = ["Action", "Adventure", "Comedy", "Drama", "Fantasy", 
+                       "Horror", "Mystery", "Romance", "Sci-Fi", "Slice of Life",
+                       "Sports", "Supernatural", "Thriller"]
+        return [g for g in parsed_genres if g in valid_genres]
+    except Exception as e:
+        app.logger.error(f"Genre validation failed: {str(e)}")
+        return []
 
 def build_anilist_query(params: dict) -> dict:
     req_count = min(params.get('request_count', 3), 10)
@@ -60,10 +68,12 @@ def build_anilist_query(params: dict) -> dict:
     """
     
     variables = {
-        "search": params.get("similar_to", ""),
-        "genre_in": params.get("genres", []),
-        "minEpisodes": int(params.get('min_episodes', 12)),
-        "sort": "POPULARITY_DESC" if params.get("binge") else "SCORE_DESC"
+        "search": params.get("similar_to", "") or None,
+        "genre_in": validate_genres(params.get('genres', [])),
+        "minEpisodes": int(params.get('min_episodes', 0)),
+        "sort": "TRENDING_DESC" if not params.get("similar_to") else (
+            "POPULARITY_DESC" if params.get("binge") else "SCORE_DESC"
+        )
     }
     
     app.logger.info(f"AniList Variables: {variables}")
@@ -77,19 +87,22 @@ def parse_query(user_query: str) -> dict:
         - similar_to (string)
         - min_episodes (integer)
         - binge (boolean)
-        - request_count (integer)
+        - request_count (integer, DEFAULT=3)
         Return JSON. Example:
-        {{"genres": ["action"], "request_count": 3}}
+        {{"genres": ["Action"], "request_count": 3}}
         """
         response = gemini.generate_content(prompt)
         parsed = json.loads(response.text)
         
-        # Ensure genres is a list
+        # Genre formatting
         if 'genres' in parsed:
             if isinstance(parsed['genres'], str):
-                parsed['genres'] = [parsed['genres']]
-            elif not isinstance(parsed['genres'], list):
-                parsed['genres'] = []
+                parsed['genres'] = [parsed['genres'].strip().capitalize()]
+            elif isinstance(parsed['genres'], list):
+                parsed['genres'] = [g.strip().capitalize() for g in parsed['genres'] if g.strip()]
+                
+        # Request count fallback
+        parsed['request_count'] = min(int(parsed.get('request_count', 3)), 10)
         
         return parsed
     except Exception as e:
@@ -117,7 +130,7 @@ def generate_nikko_response(query: str, recommendations: list, req_count: int) -
         
         response = gemini.generate_content(prompt)
         return response.text.strip()
-        
+            
     except Exception as e:
         app.logger.error(f"Nikko error: {str(e)}")
         return f"🔥 Top Picks:\n{recs_formatted}"
@@ -137,7 +150,7 @@ def webhook():
 
         # Parse parameters
         params = parse_query(user_query)
-        req_count = min(params.get('request_count', 3), 10)
+        req_count = params['request_count']
         app.logger.info(f"Parsed Params: {params}")
 
         # Build AniList request
@@ -159,7 +172,11 @@ def webhook():
             })
 
         media_items = response.json().get('data', {}).get('Page', {}).get('media', [])
+        app.logger.info(f"Raw Media Items: {media_items}")
         
+        if not media_items:
+            app.logger.warning(f"No results for params: {anilist_request}")
+
         recommendations = []
         for media in media_items:
             title = media['title']['english'] or media['title']['romaji'] or "Untitled"

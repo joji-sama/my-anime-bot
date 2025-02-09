@@ -21,26 +21,32 @@ configure(api_key=os.getenv('GEMINI_API_KEY'))
 gemini = GenerativeModel('gemini-pro')
 
 NIKKO_PROMPT = """
-You're Nikko, the anime expert with sass. Respond to "{query}" using these rules:
+You're Nikko, the sassiest anime AI. Respond to "{query}" with:
 
-1. **Genre Callout**: Explicitly mention the requested genre(s)
-2. **Recommendation Style**: 1-line descriptions with genre relevance
-3. **Sass Level**: Match query specificity
+1. Genre acknowledgment ("{genres} fan? Let's go!")
+2. Top {count} picks with hype descriptions
+3. Signature sass ("Need harder challenges? 💪")
 
-Current Genres: {genres}
+Examples:
+- "Basic taste I see... 😏 Top 3 action picks: 
+  1. Demon Slayer (Breath-taking swordplay)
+  2. Jujutsu Kaisen (Curse-breaking hype)
+  Want REAL chaos? 🔥"
+
 Recommendations: {recommendations}
 """
 
 def build_anilist_query(params: dict) -> dict:
+    """Builds proper AniList API query"""
     req_count = min(params.get('request_count', 3), 10)
     
     query = f"""
-    query ($search: String, $genre_in: [String], $minEpisodes: Int, $sort: MediaSort) {{
+    query ($search: String, $genres: [String], $minEpisodes: Int, $sort: MediaSort) {{
       Page(perPage: {req_count}) {{
         media(
           type: ANIME
           search: $search
-          genre_in: $genre_in
+          genres: $genres
           episodes_greater: $minEpisodes
           sort: [$sort]
         ) {{
@@ -55,40 +61,45 @@ def build_anilist_query(params: dict) -> dict:
     
     variables = {
         "search": params.get("similar_to", ""),
-        "genre_in": params.get("genres", []),
-        "minEpisodes": int(params.get('min_episodes', 12)),
+        "genres": params.get("genres", []),
+        "minEpisodes": 0,  # Changed from 12 to 0 to include short series
         "sort": "POPULARITY_DESC" if params.get("binge") else "SCORE_DESC"
     }
+    
+    app.logger.info(f"AniList Query Variables: {variables}")
     return {"query": query, "variables": variables}
 
 def parse_query(user_query: str) -> dict:
+    """Properly extracts and formats parameters"""
     try:
         prompt = f"""
         Extract from: "{user_query}"
-        - genres (list, lowercase)
-        - request_count (int)
+        - genres (comma-separated lowercase list)
+        - request_count (integer)
         Return JSON. Example: {{"genres": ["action"], "request_count": 3}}
         """
         response = gemini.generate_content(prompt)
         parsed = json.loads(response.text)
         
-        # Capitalize and validate genres
+        # Ensure proper genre formatting
         genres = []
         if 'genres' in parsed:
             if isinstance(parsed['genres'], str):
-                genres = [parsed['genres'].capitalize()]
+                genres = [parsed['genres'].lower().strip()]
             elif isinstance(parsed['genres'], list):
-                genres = [g.strip().capitalize() for g in parsed['genres'] if g.strip()]
+                genres = [g.lower().strip() for g in parsed['genres'] if g.strip()]
         
         return {
             "genres": genres,
             "request_count": parsed.get('request_count', 3)
         }
+        
     except Exception as e:
         app.logger.error(f"Parse error: {str(e)}")
         return {"genres": [], "request_count": 3}
 
 def generate_nikko_response(query: str, recommendations: list, req_count: int, genres: list) -> str:
+    """Generates personality-driven responses"""
     try:
         if not recommendations:
             return random.choice([
@@ -96,13 +107,16 @@ def generate_nikko_response(query: str, recommendations: list, req_count: int, g
                 "Zero results? Must be an anime void 🕳️"
             ])
             
+        recs_formatted = "\n".join(
+            f"{i+1}. {r['title']} ({r['score']}/100)" 
+            for i, r in enumerate(recommendations[:req_count])
+        )
+        
         prompt = NIKKO_PROMPT.format(
             query=query,
             genres=", ".join(genres) if genres else "generic",
-            recommendations="\n".join(
-                f"- {r['title']} ({r['score']}/100): {r['genres']}"
-                for r in recommendations
-            )
+            count=len(recommendations),
+            recommendations=recs_formatted
         )
         
         response = gemini.generate_content(prompt)
@@ -110,7 +124,7 @@ def generate_nikko_response(query: str, recommendations: list, req_count: int, g
         
     except Exception as e:
         app.logger.error(f"Nikko error: {str(e)}")
-        return "🔥 Top Picks (Technical Difficulties Edition):\n" + "\n".join(
+        return "🔥 Top Picks:\n" + "\n".join(
             f"{i+1}. {r['title']}" for i, r in enumerate(recommendations)
         )
 
@@ -127,14 +141,14 @@ def webhook():
                 "fulfillmentMessages": [{"text": {"text": ["Invalid query"]}}]
             })
 
-        # Parse parameters
+        # Parse parameters with proper formatting
         params = parse_query(user_query)
         req_count = min(params.get('request_count', 3), 10)
         genres = params.get('genres', [])
         
-        app.logger.info(f"Parsed Params: {params}")
+        app.logger.info(f"Parsed Parameters: {params}")
 
-        # Build AniList request
+        # Build and send AniList request
         anilist_request = build_anilist_query(params)
         response = requests.post(
             "https://graphql.anilist.co",
@@ -143,12 +157,16 @@ def webhook():
             timeout=10
         )
 
+        app.logger.info(f"AniList Status Code: {response.status_code}")
+        app.logger.info(f"AniList Response: {response.text}")
+
         if response.status_code != 200:
             return jsonify({
-                "fulfillmentText": "AniList glitched! 🛠️ Try different terms",
+                "fulfillmentText": "AniList is being tsundere 🎌 Try again!",
                 "fulfillmentMessages": [{"text": {"text": ["API Error"]}}]
             })
 
+        # Process response
         media_items = response.json().get('data', {}).get('Page', {}).get('media', [])
         
         recommendations = []
@@ -157,9 +175,11 @@ def webhook():
             recommendations.append({
                 "title": title,
                 "score": media.get('averageScore', 'N/A'),
-                "genres": ", ".join(media.get('genres', []))
+                "genres": ", ".join(media.get('genres', [])),
+                "url": media.get('siteUrl', 'https://anilist.co')
             })
 
+        # Generate Nikko's response
         nikko_summary = generate_nikko_response(user_query, recommendations, req_count, genres)
         
         return jsonify({
@@ -181,7 +201,7 @@ def webhook():
     except Exception as e:
         app.logger.error(f"Critical Error: {str(e)}")
         return jsonify({
-            "fulfillmentText": "System crashed...too much sass overload 💥",
+            "fulfillmentText": "System crashed...sass overload 💥",
             "fulfillmentMessages": [{"text": {"text": ["Server error"]}}]
         })
 
